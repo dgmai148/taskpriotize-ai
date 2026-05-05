@@ -1,4 +1,5 @@
 const express = require('express');
+const { v4: uuidv4 } = require('uuid');
 const { pool } = require('../config/db');
 const { authenticate, requireRole } = require('../middleware/auth');
 
@@ -30,16 +31,17 @@ router.post('/', authenticate, requireRole('admin', 'pm'), async (req, res) => {
     const { name, description, status } = req.body;
     if (!name) return res.status(400).json({ error: 'name is required' });
 
+    const projectId = uuidv4();
     const result = await pool.query(
-      `INSERT INTO projects (name, description, status, owner_id)
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [name, description || '', status || 'active', req.user.id]
+      `INSERT INTO projects (id, name, description, status, owner_id)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [projectId, name, description || '', status || 'active', req.user.id]
     );
 
     await pool.query(
-      `INSERT INTO audit_log (user_id, action, entity_type, entity_id, details)
-       VALUES ($1, 'create', 'project', $2, $3)`,
-      [req.user.id, result.rows[0].id, JSON.stringify({ name })]
+      `INSERT INTO audit_log (id, user_id, action, entity_type, entity_id, details)
+       VALUES ($1, $2, 'create', 'project', $3, $4)`,
+      [uuidv4(), req.user.id, result.rows[0].id, JSON.stringify({ name })]
     );
 
     res.status(201).json(result.rows[0]);
@@ -71,14 +73,14 @@ router.put('/:id', authenticate, requireRole('admin', 'pm'), async (req, res) =>
     const { name, description, status } = req.body;
     const result = await pool.query(
       `UPDATE projects SET name = COALESCE($1,name), description = COALESCE($2,description),
-       status = COALESCE($3,status), updated_at = NOW() WHERE id = $4 RETURNING *`,
+       status = COALESCE($3,status), updated_at = datetime('now') WHERE id = $4 RETURNING *`,
       [name, description, status, req.params.id]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Project not found' });
 
     await pool.query(
-      `INSERT INTO audit_log (user_id, action, entity_type, entity_id, details) VALUES ($1,'update','project',$2,$3)`,
-      [req.user.id, req.params.id, JSON.stringify(req.body)]
+      `INSERT INTO audit_log (id, user_id, action, entity_type, entity_id, details) VALUES ($1,$2,'update','project',$3,$4)`,
+      [uuidv4(), req.user.id, req.params.id, JSON.stringify(req.body)]
     );
     res.json(result.rows[0]);
   } catch (err) {

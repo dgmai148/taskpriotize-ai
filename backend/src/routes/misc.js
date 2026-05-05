@@ -21,7 +21,7 @@ router.get('/', authenticate, async (req, res) => {
 router.get('/unread-count', authenticate, async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT COUNT(*) as count FROM notifications WHERE user_id = $1 AND read = FALSE',
+      'SELECT COUNT(*) as count FROM notifications WHERE user_id = $1 AND read = 0',
       [req.user.id]
     );
     res.json({ count: parseInt(result.rows[0].count) });
@@ -33,7 +33,7 @@ router.get('/unread-count', authenticate, async (req, res) => {
 // PUT /api/notifications/:id/read
 router.put('/:id/read', authenticate, async (req, res) => {
   try {
-    await pool.query('UPDATE notifications SET read = TRUE WHERE id = $1 AND user_id = $2', [
+    await pool.query('UPDATE notifications SET read = 1 WHERE id = $1 AND user_id = $2', [
       req.params.id, req.user.id,
     ]);
     res.json({ message: 'Marked as read' });
@@ -45,7 +45,7 @@ router.put('/:id/read', authenticate, async (req, res) => {
 // PUT /api/notifications/read-all
 router.put('/read-all', authenticate, async (req, res) => {
   try {
-    await pool.query('UPDATE notifications SET read = TRUE WHERE user_id = $1 AND read = FALSE', [req.user.id]);
+    await pool.query('UPDATE notifications SET read = 1 WHERE user_id = $1 AND read = 0', [req.user.id]);
     res.json({ message: 'All marked as read' });
   } catch (err) {
     res.status(500).json({ error: 'Internal server error' });

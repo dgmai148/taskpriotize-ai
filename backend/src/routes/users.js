@@ -1,5 +1,6 @@
 const express = require('express');
 const bcrypt = require('bcrypt');
+const { v4: uuidv4 } = require('uuid');
 const { pool } = require('../config/db');
 const { authenticate, requireRole } = require('../middleware/auth');
 
@@ -17,12 +18,12 @@ router.get('/', authenticate, async (req, res) => {
       query += ` AND role = $${params.length}`;
     }
     if (is_active !== undefined) {
-      params.push(is_active === 'true');
+      params.push(is_active === 'true' ? 1 : 0);
       query += ` AND is_active = $${params.length}`;
     }
     if (search) {
       params.push(`%${search}%`);
-      query += ` AND (name ILIKE $${params.length} OR email ILIKE $${params.length})`;
+      query += ` AND (name LIKE $${params.length} OR email LIKE $${params.length})`;
     }
     query += ' ORDER BY name';
 
@@ -46,9 +47,9 @@ router.get('/:id', authenticate, async (req, res) => {
     // Include task stats
     const stats = await pool.query(
       `SELECT
-         COUNT(*) FILTER (WHERE assignee_id = $1) as assigned_tasks,
-         COUNT(*) FILTER (WHERE assignee_id = $1 AND status = 'done') as completed_tasks,
-         COUNT(*) FILTER (WHERE assignee_id = $1 AND status IN ('open','in_progress','review','blocked')) as active_tasks
+         SUM(CASE WHEN assignee_id = $1 THEN 1 ELSE 0 END) as assigned_tasks,
+         SUM(CASE WHEN assignee_id = $1 AND status = 'done' THEN 1 ELSE 0 END) as completed_tasks,
+         SUM(CASE WHEN assignee_id = $1 AND status IN ('open','in_progress','review','blocked') THEN 1 ELSE 0 END) as active_tasks
        FROM tasks`,
       [req.params.id]
     );
@@ -77,17 +78,18 @@ router.post('/', authenticate, requireRole('admin'), async (req, res) => {
     const colors = ['#4f46e5', '#dc2626', '#16a34a', '#d97706', '#7c3aed', '#0891b2', '#be185d', '#65a30d'];
     const avatarColor = colors[Math.floor(Math.random() * colors.length)];
     const passwordHash = await bcrypt.hash(password, 10);
+    const userId = uuidv4();
 
     const result = await pool.query(
-      `INSERT INTO users (email, password_hash, name, role, avatar_color)
-       VALUES ($1, $2, $3, $4, $5) RETURNING id, email, name, role, avatar_color, is_active, created_at`,
-      [email, passwordHash, name, validRole, avatarColor]
+      `INSERT INTO users (id, email, password_hash, name, role, avatar_color)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, email, name, role, avatar_color, is_active, created_at`,
+      [userId, email, passwordHash, name, validRole, avatarColor]
     );
 
     await pool.query(
-      `INSERT INTO audit_log (user_id, action, entity_type, entity_id, details)
-       VALUES ($1, 'create_user', 'user', $2, $3)`,
-      [req.user.id, result.rows[0].id, JSON.stringify({ email, name, role: validRole })]
+      `INSERT INTO audit_log (id, user_id, action, entity_type, entity_id, details)
+       VALUES ($1, $2, 'create_user', 'user', $3, $4)`,
+      [uuidv4(), req.user.id, result.rows[0].id, JSON.stringify({ email, name, role: validRole })]
     );
 
     res.status(201).json(result.rows[0]);
@@ -107,7 +109,7 @@ router.put('/:id', authenticate, requireRole('admin'), async (req, res) => {
          email = COALESCE($2, email),
          role = COALESCE($3, role),
          is_active = COALESCE($4, is_active),
-         updated_at = NOW()
+         updated_at = datetime('now')
        WHERE id = $5
        RETURNING id, email, name, role, avatar_color, is_active, created_at`,
       [name, email, role, is_active, req.params.id]
@@ -115,9 +117,9 @@ router.put('/:id', authenticate, requireRole('admin'), async (req, res) => {
     if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
 
     await pool.query(
-      `INSERT INTO audit_log (user_id, action, entity_type, entity_id, details)
-       VALUES ($1, 'update_user', 'user', $2, $3)`,
-      [req.user.id, req.params.id, JSON.stringify(req.body)]
+      `INSERT INTO audit_log (id, user_id, action, entity_type, entity_id, details)
+       VALUES ($1, $2, 'update_user', 'user', $3, $4)`,
+      [uuidv4(), req.user.id, req.params.id, JSON.stringify(req.body)]
     );
 
     res.json(result.rows[0]);
@@ -135,12 +137,12 @@ router.put('/:id/password', authenticate, requireRole('admin'), async (req, res)
       return res.status(400).json({ error: 'Password must be at least 4 characters' });
     }
     const hash = await bcrypt.hash(password, 10);
-    await pool.query('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [hash, req.params.id]);
+    await pool.query('UPDATE users SET password_hash = $1, updated_at = datetime(\'now\') WHERE id = $2', [hash, req.params.id]);
 
     await pool.query(
-      `INSERT INTO audit_log (user_id, action, entity_type, entity_id, details)
-       VALUES ($1, 'reset_password', 'user', $2, '{}')`,
-      [req.user.id, req.params.id]
+      `INSERT INTO audit_log (id, user_id, action, entity_type, entity_id, details)
+       VALUES ($1, $2, 'reset_password', 'user', $3, '{}')`,
+      [uuidv4(), req.user.id, req.params.id]
     );
 
     res.json({ message: 'Password updated' });
@@ -156,12 +158,12 @@ router.delete('/:id', authenticate, requireRole('admin'), async (req, res) => {
     if (req.params.id === req.user.id) {
       return res.status(400).json({ error: 'Cannot deactivate yourself' });
     }
-    await pool.query('UPDATE users SET is_active = FALSE, updated_at = NOW() WHERE id = $1', [req.params.id]);
+    await pool.query('UPDATE users SET is_active = 0, updated_at = datetime(\'now\') WHERE id = $1', [req.params.id]);
 
     await pool.query(
-      `INSERT INTO audit_log (user_id, action, entity_type, entity_id, details)
-       VALUES ($1, 'deactivate_user', 'user', $2, '{}')`,
-      [req.user.id, req.params.id]
+      `INSERT INTO audit_log (id, user_id, action, entity_type, entity_id, details)
+       VALUES ($1, $2, 'deactivate_user', 'user', $3, '{}')`,
+      [uuidv4(), req.user.id, req.params.id]
     );
 
     res.json({ message: 'User deactivated' });
@@ -176,7 +178,7 @@ router.put('/profile/me', authenticate, async (req, res) => {
   try {
     const { name, avatar_color } = req.body;
     const result = await pool.query(
-      `UPDATE users SET name = COALESCE($1, name), avatar_color = COALESCE($2, avatar_color), updated_at = NOW()
+      `UPDATE users SET name = COALESCE($1, name), avatar_color = COALESCE($2, avatar_color), updated_at = datetime('now')
        WHERE id = $3 RETURNING id, email, name, role, avatar_color, is_active, created_at`,
       [name, avatar_color, req.user.id]
     );
@@ -200,7 +202,7 @@ router.put('/profile/password', authenticate, async (req, res) => {
     if (!valid) return res.status(401).json({ error: 'Current password is incorrect' });
 
     const hash = await bcrypt.hash(new_password, 10);
-    await pool.query('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [hash, req.user.id]);
+    await pool.query('UPDATE users SET password_hash = $1, updated_at = datetime(\'now\') WHERE id = $2', [hash, req.user.id]);
     res.json({ message: 'Password changed' });
   } catch (err) {
     console.error('[Users] Change password error:', err);

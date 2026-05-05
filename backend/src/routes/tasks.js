@@ -1,11 +1,27 @@
 const express = require('express');
 const fetch = require('node-fetch');
+const { v4: uuidv4 } = require('uuid');
 const { pool } = require('../config/db');
 const { authenticate, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
 
 const ML_SERVICE_URL = process.env.ML_SERVICE_URL || 'http://localhost:5050';
+
+// Parse JSON text fields that SQLite returns as strings
+function parseTaskRow(row) {
+  if (!row) return row;
+  if (row.dependencies && typeof row.dependencies === 'string') {
+    try { row.dependencies = JSON.parse(row.dependencies); } catch { row.dependencies = []; }
+  }
+  if (row.tags && typeof row.tags === 'string') {
+    try { row.tags = JSON.parse(row.tags); } catch { row.tags = []; }
+  }
+  if (row.ai_explanation && typeof row.ai_explanation === 'string') {
+    try { row.ai_explanation = JSON.parse(row.ai_explanation); } catch { row.ai_explanation = null; }
+  }
+  return row;
+}
 
 // Auto-score all tasks in a project via ML service (fire-and-forget)
 async function autoScoreProject(projectId) {
@@ -50,7 +66,7 @@ async function autoScoreProject(projectId) {
 
     for (const pred of predictions.results) {
       await pool.query(
-        `UPDATE tasks SET ai_priority_score = $1, ai_explanation = $2, updated_at = NOW() WHERE id = $3`,
+        `UPDATE tasks SET ai_priority_score = $1, ai_explanation = $2, updated_at = datetime('now') WHERE id = $3`,
         [pred.score, JSON.stringify(pred.explanation), pred.id]
       );
     }
@@ -71,7 +87,7 @@ router.get('/', authenticate, async (req, res) => {
              c.name as creator_name,
              p.name as project_name,
              COALESCE(
-               (SELECT json_agg(json_build_object('id', td.depends_on_id, 'title', dt.title))
+               (SELECT json_group_array(json_object('id', td.depends_on_id, 'title', dt.title))
                 FROM task_dependencies td
                 JOIN tasks dt ON dt.id = td.depends_on_id
                 WHERE td.task_id = t.id), '[]'
@@ -108,13 +124,13 @@ router.get('/', authenticate, async (req, res) => {
     }
     if (search) {
       params.push(`%${search}%`);
-      query += ` AND (t.title ILIKE $${params.length} OR t.description ILIKE $${params.length})`;
+      query += ` AND (t.title LIKE $${params.length} OR t.description LIKE $${params.length})`;
     }
 
     query += ' ORDER BY t.ai_priority_score DESC, t.created_at DESC';
 
     const result = await pool.query(query, params);
-    res.json(result.rows);
+    res.json(result.rows.map(parseTaskRow));
   } catch (err) {
     console.error('[Tasks] List error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -140,7 +156,7 @@ router.get('/:id', authenticate, async (req, res) => {
       [req.params.id]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Task not found' });
-    res.json(result.rows[0]);
+    res.json(parseTaskRow(result.rows[0]));
   } catch (err) {
     console.error('[Tasks] Get error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -155,23 +171,24 @@ router.post('/', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'project_id and title are required' });
     }
 
+    const taskId = uuidv4();
     const result = await pool.query(
-      `INSERT INTO tasks (project_id, title, description, status, manual_priority, assignee_id, created_by, story_points, due_date, tags)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+      `INSERT INTO tasks (id, project_id, title, description, status, manual_priority, assignee_id, created_by, story_points, due_date, tags)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
       [
-        project_id, title, description || '', status || 'open',
+        taskId, project_id, title, description || '', status || 'open',
         manual_priority || 'medium', assignee_id || null, req.user.id,
-        story_points || 0, due_date || null, tags || [],
+        story_points || 0, due_date || null, JSON.stringify(tags || []),
       ]
     );
-    const task = result.rows[0];
+    const task = parseTaskRow(result.rows[0]);
 
     // Add dependencies
     if (dependencies && dependencies.length > 0) {
       for (const depId of dependencies) {
         await pool.query(
-          'INSERT INTO task_dependencies (task_id, depends_on_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-          [task.id, depId]
+          'INSERT INTO task_dependencies (id, task_id, depends_on_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+          [uuidv4(), task.id, depId]
         );
       }
       await pool.query('UPDATE tasks SET dependency_count = $1 WHERE id = $2', [dependencies.length, task.id]);
@@ -180,21 +197,21 @@ router.post('/', authenticate, async (req, res) => {
     // Notify assignee
     if (assignee_id && assignee_id !== req.user.id) {
       await pool.query(
-        `INSERT INTO notifications (user_id, type, message, link) VALUES ($1, 'assignment', $2, $3)`,
-        [assignee_id, `${req.user.name} assigned you "${title}"`, `/projects/${project_id}`]
+        `INSERT INTO notifications (id, user_id, type, message, link) VALUES ($1, $2, 'assignment', $3, $4)`,
+        [uuidv4(), assignee_id, `${req.user.name} assigned you "${title}"`, `/projects/${project_id}`]
       );
     }
 
     // Activity log
     await pool.query(
-      `INSERT INTO task_activity (task_id, user_id, action, new_value) VALUES ($1, $2, 'created', $3)`,
-      [task.id, req.user.id, title]
+      `INSERT INTO task_activity (id, task_id, user_id, action, new_value) VALUES ($1, $2, $3, 'created', $4)`,
+      [uuidv4(), task.id, req.user.id, title]
     );
 
     await pool.query(
-      `INSERT INTO audit_log (user_id, action, entity_type, entity_id, details)
-       VALUES ($1, 'create', 'task', $2, $3)`,
-      [req.user.id, task.id, JSON.stringify({ title, project_id })]
+      `INSERT INTO audit_log (id, user_id, action, entity_type, entity_id, details)
+       VALUES ($1, $2, 'create', 'task', $3, $4)`,
+      [uuidv4(), req.user.id, task.id, JSON.stringify({ title, project_id })]
     );
 
     // Auto-score project tasks in background
@@ -219,7 +236,7 @@ router.put('/:id', authenticate, async (req, res) => {
 
     // Handle completed_at
     let completedAt = old.completed_at;
-    if (status === 'done' && old.status !== 'done') completedAt = new Date();
+    if (status === 'done' && old.status !== 'done') completedAt = new Date().toISOString();
     else if (status && status !== 'done') completedAt = null;
 
     const result = await pool.query(
@@ -233,36 +250,36 @@ router.put('/:id', authenticate, async (req, res) => {
          due_date = COALESCE($7, due_date),
          tags = COALESCE($8, tags),
          completed_at = $9,
-         updated_at = NOW()
+         updated_at = datetime('now')
        WHERE id = $10 RETURNING *`,
-      [title, description, status, manual_priority, assignee_id, story_points, due_date, tags, completedAt, req.params.id]
+      [title, description, status, manual_priority, assignee_id, story_points, due_date, tags ? JSON.stringify(tags) : null, completedAt, req.params.id]
     );
 
     // Activity tracking for key changes
     if (status && status !== old.status) {
       await pool.query(
-        'INSERT INTO task_activity (task_id, user_id, action, old_value, new_value) VALUES ($1,$2,$3,$4,$5)',
-        [req.params.id, req.user.id, 'status_change', old.status, status]
+        'INSERT INTO task_activity (id, task_id, user_id, action, old_value, new_value) VALUES ($1,$2,$3,$4,$5,$6)',
+        [uuidv4(), req.params.id, req.user.id, 'status_change', old.status, status]
       );
     }
     if (assignee_id && assignee_id !== old.assignee_id) {
       await pool.query(
-        'INSERT INTO task_activity (task_id, user_id, action, old_value, new_value) VALUES ($1,$2,$3,$4,$5)',
-        [req.params.id, req.user.id, 'reassigned', old.assignee_id, assignee_id]
+        'INSERT INTO task_activity (id, task_id, user_id, action, old_value, new_value) VALUES ($1,$2,$3,$4,$5,$6)',
+        [uuidv4(), req.params.id, req.user.id, 'reassigned', old.assignee_id, assignee_id]
       );
       // Notify new assignee
       if (assignee_id !== req.user.id) {
         await pool.query(
-          `INSERT INTO notifications (user_id, type, message, link) VALUES ($1, 'assignment', $2, $3)`,
-          [assignee_id, `${req.user.name} assigned you "${old.title}"`, `/projects/${old.project_id}`]
+          `INSERT INTO notifications (id, user_id, type, message, link) VALUES ($1, $2, 'assignment', $3, $4)`,
+          [uuidv4(), assignee_id, `${req.user.name} assigned you "${old.title}"`, `/projects/${old.project_id}`]
         );
       }
     }
 
     await pool.query(
-      `INSERT INTO audit_log (user_id, action, entity_type, entity_id, details)
-       VALUES ($1, 'update', 'task', $2, $3)`,
-      [req.user.id, req.params.id, JSON.stringify(req.body)]
+      `INSERT INTO audit_log (id, user_id, action, entity_type, entity_id, details)
+       VALUES ($1, $2, 'update', 'task', $3, $4)`,
+      [uuidv4(), req.user.id, req.params.id, JSON.stringify(req.body)]
     );
 
     // Auto-score project tasks in background when key fields change
@@ -270,7 +287,7 @@ router.put('/:id', authenticate, async (req, res) => {
       autoScoreProject(result.rows[0].project_id).catch(() => {});
     }
 
-    res.json(result.rows[0]);
+    res.json(parseTaskRow(result.rows[0]));
   } catch (err) {
     console.error('[Tasks] Update error:', err);
     res.status(500).json({ error: 'Internal server error' });
@@ -284,9 +301,9 @@ router.delete('/:id', authenticate, async (req, res) => {
     if (result.rows.length === 0) return res.status(404).json({ error: 'Task not found' });
 
     await pool.query(
-      `INSERT INTO audit_log (user_id, action, entity_type, entity_id, details)
-       VALUES ($1, 'delete', 'task', $2, $3)`,
-      [req.user.id, req.params.id, JSON.stringify({ title: result.rows[0].title })]
+      `INSERT INTO audit_log (id, user_id, action, entity_type, entity_id, details)
+       VALUES ($1, $2, 'delete', 'task', $3, $4)`,
+      [uuidv4(), req.user.id, req.params.id, JSON.stringify({ title: result.rows[0].title })]
     );
 
     res.json({ message: 'Task deleted' });
@@ -303,8 +320,8 @@ router.post('/:id/dependencies', authenticate, async (req, res) => {
     if (!depends_on_id) return res.status(400).json({ error: 'depends_on_id required' });
 
     await pool.query(
-      'INSERT INTO task_dependencies (task_id, depends_on_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-      [req.params.id, depends_on_id]
+      'INSERT INTO task_dependencies (id, task_id, depends_on_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+      [uuidv4(), req.params.id, depends_on_id]
     );
     const countResult = await pool.query('SELECT COUNT(*) as cnt FROM task_dependencies WHERE task_id = $1', [req.params.id]);
     await pool.query('UPDATE tasks SET dependency_count = $1 WHERE id = $2', [countResult.rows[0].cnt, req.params.id]);
@@ -355,27 +372,27 @@ router.post('/override-priority', authenticate, requireRole('pm', 'admin'), asyn
     const previousScore = taskResult.rows[0].ai_priority_score;
 
     await pool.query(
-      `INSERT INTO priority_overrides (task_id, overridden_by, previous_score, new_score, reason)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [task_id, req.user.id, previousScore, new_score, reason || '']
+      `INSERT INTO priority_overrides (id, task_id, overridden_by, previous_score, new_score, reason)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [uuidv4(), task_id, req.user.id, previousScore, new_score, reason || '']
     );
-    await pool.query('UPDATE tasks SET ai_priority_score = $1, updated_at = NOW() WHERE id = $2', [new_score, task_id]);
+    await pool.query('UPDATE tasks SET ai_priority_score = $1, updated_at = datetime(\'now\') WHERE id = $2', [new_score, task_id]);
 
     await pool.query(
-      'INSERT INTO task_activity (task_id, user_id, action, old_value, new_value) VALUES ($1,$2,$3,$4,$5)',
-      [task_id, req.user.id, 'priority_override', String(previousScore), String(new_score)]
+      'INSERT INTO task_activity (id, task_id, user_id, action, old_value, new_value) VALUES ($1,$2,$3,$4,$5,$6)',
+      [uuidv4(), task_id, req.user.id, 'priority_override', String(previousScore), String(new_score)]
     );
 
     await pool.query(
-      `INSERT INTO audit_log (user_id, action, entity_type, entity_id, details)
-       VALUES ($1, 'priority_override', 'task', $2, $3)`,
-      [req.user.id, task_id, JSON.stringify({ previous_score: previousScore, new_score, reason })]
+      `INSERT INTO audit_log (id, user_id, action, entity_type, entity_id, details)
+       VALUES ($1, $2, 'priority_override', 'task', $3, $4)`,
+      [uuidv4(), req.user.id, task_id, JSON.stringify({ previous_score: previousScore, new_score, reason })]
     );
 
     if (taskResult.rows[0].assignee_id && taskResult.rows[0].assignee_id !== req.user.id) {
       await pool.query(
-        `INSERT INTO notifications (user_id, type, message, link) VALUES ($1, 'override', $2, $3)`,
-        [taskResult.rows[0].assignee_id, `Priority for "${taskResult.rows[0].title}" overridden to ${new_score}% by ${req.user.name}`, `/projects/${taskResult.rows[0].project_id}`]
+        `INSERT INTO notifications (id, user_id, type, message, link) VALUES ($1, $2, 'override', $3, $4)`,
+        [uuidv4(), taskResult.rows[0].assignee_id, `Priority for "${taskResult.rows[0].title}" overridden to ${new_score}% by ${req.user.name}`, `/projects/${taskResult.rows[0].project_id}`]
       );
     }
 
@@ -407,14 +424,14 @@ router.put('/bulk/update', authenticate, async (req, res) => {
           params.push(status);
           setClauses.push(`status = $${params.length}`);
           if (status === 'done') {
-            setClauses.push('completed_at = NOW()');
+            setClauses.push(`completed_at = datetime('now')`);
           }
         }
         if (assignee_id) {
           params.push(assignee_id);
           setClauses.push(`assignee_id = $${params.length}`);
         }
-        setClauses.push('updated_at = NOW()');
+        setClauses.push(`updated_at = datetime('now')`);
         params.push(id);
         await pool.query(`UPDATE tasks SET ${setClauses.join(', ')} WHERE id = $${params.length}`, params);
         updated++;

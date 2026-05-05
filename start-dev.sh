@@ -19,9 +19,6 @@ cleanup() {
       kill "$pid" 2>/dev/null
     fi
   done
-  # stop the postgres container
-  docker stop taskprio-postgres 2>/dev/null || true
-  docker rm taskprio-postgres 2>/dev/null || true
   echo -e "${GREEN}All services stopped.${NC}"
   exit 0
 }
@@ -31,21 +28,39 @@ trap cleanup SIGINT SIGTERM EXIT
 # --- pre-flight checks ---
 echo -e "${YELLOW}Checking prerequisites...${NC}"
 
-for cmd in docker node npm python3; do
+for cmd in node npm; do
   if ! command -v "$cmd" &>/dev/null; then
     echo -e "${RED}Error: '$cmd' is not installed.${NC}"
     exit 1
   fi
 done
 
+# python3 on Linux/macOS, python on Windows
+PYTHON="python3"
+if ! command -v python3 &>/dev/null; then
+  if command -v python &>/dev/null; then
+    PYTHON="python"
+  else
+    echo -e "${RED}Error: 'python' is not installed.${NC}"
+    exit 1
+  fi
+fi
+
 # --- kill processes occupying required ports ---
 kill_port() {
   local port=$1
   local pids
-  pids=$(lsof -ti :"$port" 2>/dev/null || true)
+  # Works on both Linux (lsof) and Windows Git Bash (netstat)
+  if command -v lsof &>/dev/null; then
+    pids=$(lsof -ti :"$port" 2>/dev/null || true)
+  else
+    pids=$(netstat -ano 2>/dev/null | grep ":$port " | grep "LISTENING" | awk '{print $5}' | sort -u || true)
+  fi
   if [ -n "$pids" ]; then
     echo -e "${YELLOW}  Port $port is in use (pid $pids). Killing...${NC}"
-    echo "$pids" | xargs kill -9 2>/dev/null || true
+    for p in $pids; do
+      kill -9 "$p" 2>/dev/null || taskkill //PID "$p" //F 2>/dev/null || true
+    done
     sleep 1
   fi
 }
@@ -55,38 +70,33 @@ kill_port 5050
 kill_port 4000
 kill_port 3000
 
-# --- 1. PostgreSQL (Docker) ---
-echo -e "${GREEN}Starting PostgreSQL...${NC}"
-if docker ps --format '{{.Names}}' | grep -q '^taskprio-postgres$'; then
-  echo "  PostgreSQL container already running."
-else
-  docker rm -f taskprio-postgres 2>/dev/null || true
-  docker run -d \
-    --name taskprio-postgres \
-    -e POSTGRES_USER=taskprio \
-    -e POSTGRES_PASSWORD=taskprio_secret \
-    -e POSTGRES_DB=taskprio \
-    -p 5433:5432 \
-    -v "$ROOT_DIR/db/init.sql:/docker-entrypoint-initdb.d/01-init.sql" \
-    postgres:16-alpine >/dev/null
-  echo "  Waiting for PostgreSQL to be ready..."
-  until docker exec taskprio-postgres pg_isready -U taskprio &>/dev/null; do
-    sleep 1
-  done
-  echo "  PostgreSQL ready on port 5433."
+# --- 1. SQLite Database ---
+echo -e "${GREEN}Setting up SQLite database...${NC}"
+DB_DIR="$ROOT_DIR/backend/data"
+DB_PATH="$DB_DIR/taskprio.db"
+if [ ! -d "$DB_DIR" ]; then
+  mkdir -p "$DB_DIR"
+  echo "  Created data directory."
 fi
+export SQLITE_PATH="$DB_PATH"
+echo "  SQLite database: $DB_PATH"
 
 # --- 2. ML Service (Flask) ---
 echo -e "${GREEN}Starting ML Service...${NC}"
 if [ ! -d "$ROOT_DIR/ml-service/venv" ]; then
   echo "  Creating Python virtual environment..."
-  python3 -m venv "$ROOT_DIR/ml-service/venv"
+  $PYTHON -m venv "$ROOT_DIR/ml-service/venv"
 fi
-source "$ROOT_DIR/ml-service/venv/bin/activate"
+# Activate venv (Scripts on Windows, bin on Linux/macOS)
+if [ -f "$ROOT_DIR/ml-service/venv/Scripts/activate" ]; then
+  source "$ROOT_DIR/ml-service/venv/Scripts/activate"
+else
+  source "$ROOT_DIR/ml-service/venv/bin/activate"
+fi
 pip install -q -r "$ROOT_DIR/ml-service/requirements.txt"
 
 cd "$ROOT_DIR/ml-service"
-FLASK_PORT=5050 python3 app.py &
+FLASK_PORT=5050 $PYTHON app.py &
 PIDS+=($!)
 cd "$ROOT_DIR"
 deactivate
@@ -104,7 +114,6 @@ if [ ! -d "$ROOT_DIR/backend/node_modules" ]; then
   npm install --prefix "$ROOT_DIR/backend" --silent
 fi
 
-export DATABASE_URL="postgresql://taskprio:taskprio_secret@localhost:5433/taskprio"
 export ML_SERVICE_URL="http://localhost:5050"
 export NODE_ENV=development
 export JWT_ISSUER=taskprio-app
@@ -133,7 +142,7 @@ echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}  All services starting!${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
-echo "  PostgreSQL  : localhost:5433"
+echo "  SQLite DB   : $DB_PATH"
 echo "  ML Service  : http://localhost:5050"
 echo "  Backend API : http://localhost:4000"
 echo "  Frontend    : http://localhost:3000"

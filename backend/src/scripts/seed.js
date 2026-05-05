@@ -77,22 +77,24 @@ async function seed() {
   const userIds = [];
   for (const u of DEMO_USERS) {
     const hash = await bcrypt.hash(u.password, 10);
-    const result = await pool.query(
-      'INSERT INTO users (email, password_hash, name, role, avatar_color) VALUES ($1,$2,$3,$4,$5) RETURNING id',
-      [u.email, hash, u.name, u.role, u.avatar_color]
+    const id = uuidv4();
+    await pool.query(
+      'INSERT INTO users (id, email, password_hash, name, role, avatar_color) VALUES ($1,$2,$3,$4,$5,$6)',
+      [id, u.email, hash, u.name, u.role, u.avatar_color]
     );
-    userIds.push(result.rows[0].id);
+    userIds.push(id);
   }
   console.log(`[Seed] Created ${userIds.length} users`);
 
   // Create projects
   const projectIds = [];
   for (const p of PROJECTS) {
-    const result = await pool.query(
-      'INSERT INTO projects (name, description, owner_id) VALUES ($1,$2,$3) RETURNING id',
-      [p.name, p.description, userIds[1]] // PM owns projects
+    const id = uuidv4();
+    await pool.query(
+      'INSERT INTO projects (id, name, description, owner_id) VALUES ($1,$2,$3,$4)',
+      [id, p.name, p.description, userIds[1]] // PM owns projects
     );
-    projectIds.push(result.rows[0].id);
+    projectIds.push(id);
   }
   console.log(`[Seed] Created ${projectIds.length} projects`);
 
@@ -107,20 +109,21 @@ async function seed() {
       const dueDate = new Date();
       dueDate.setDate(dueDate.getDate() + t.days_due);
 
-      const result = await pool.query(
-        `INSERT INTO tasks (project_id, title, description, status, manual_priority, assignee_id, created_by, story_points, due_date, completed_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
-        [projectIds[pi], t.title, t.description, t.status, t.manual_priority, assignee, userIds[1], t.story_points, dueDate, t.status === 'done' ? new Date() : null]
+      const id = uuidv4();
+      await pool.query(
+        `INSERT INTO tasks (id, project_id, title, description, status, manual_priority, assignee_id, created_by, story_points, due_date, completed_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        [id, projectIds[pi], t.title, t.description, t.status, t.manual_priority, assignee, userIds[1], t.story_points, dueDate.toISOString().split('T')[0], t.status === 'done' ? new Date().toISOString() : null]
       );
-      taskIds.push(result.rows[0].id);
+      taskIds.push(id);
     }
 
     // Create dependencies
     const deps = DEPENDENCIES[pi];
     for (const [taskIdx, depIdx] of deps) {
       await pool.query(
-        'INSERT INTO task_dependencies (task_id, depends_on_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-        [taskIds[taskIdx], taskIds[depIdx]]
+        'INSERT INTO task_dependencies (id, task_id, depends_on_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+        [uuidv4(), taskIds[taskIdx], taskIds[depIdx]]
       );
     }
 

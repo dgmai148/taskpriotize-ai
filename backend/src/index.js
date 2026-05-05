@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const { pool } = require('./config/db');
+const { initDatabase } = require('./config/init-db');
 const { seed } = require('./scripts/seed');
 
 // Route imports
@@ -61,8 +62,8 @@ app.use((err, req, res, next) => {
 // Start server
 async function start() {
   try {
-    await pool.query('SELECT 1');
-    console.log('[DB] Connected to PostgreSQL');
+    initDatabase();
+    console.log('[DB] SQLite database ready');
     await seed();
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`[Server] TaskPrio API running on port ${PORT}`);

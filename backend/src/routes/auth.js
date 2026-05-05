@@ -35,9 +35,9 @@ async function createRefreshToken(userId, familyId = null) {
   const expiresAt = new Date(Date.now() + refreshTokenExpiryMs);
 
   await pool.query(
-    `INSERT INTO refresh_tokens (user_id, token_hash, family_id, expires_at)
-     VALUES ($1, $2, $3, $4)`,
-    [userId, hash, family, expiresAt]
+    `INSERT INTO refresh_tokens (id, user_id, token_hash, family_id, expires_at)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [uuidv4(), userId, hash, family, expiresAt.toISOString()]
   );
 
   return { token, familyId: family };
@@ -60,9 +60,9 @@ router.post('/register', async (req, res) => {
     const userRole = ['admin', 'pm', 'developer'].includes(role) ? role : 'developer';
 
     const result = await pool.query(
-      `INSERT INTO users (email, password_hash, name, role)
-       VALUES ($1, $2, $3, $4) RETURNING id, email, name, role, avatar_color, created_at`,
-      [email, passwordHash, name, userRole]
+      `INSERT INTO users (id, email, password_hash, name, role)
+       VALUES ($1, $2, $3, $4, $5) RETURNING id, email, name, role, avatar_color, created_at`,
+      [uuidv4(), email, passwordHash, name, userRole]
     );
     const user = result.rows[0];
 
@@ -136,7 +136,7 @@ router.post('/refresh', async (req, res) => {
     // Reuse detection: if token was already revoked, revoke entire family
     if (storedToken.revoked) {
       await pool.query(
-        'UPDATE refresh_tokens SET revoked = TRUE WHERE family_id = $1',
+        'UPDATE refresh_tokens SET revoked = 1 WHERE family_id = $1',
         [storedToken.family_id]
       );
       console.warn('[Auth] Refresh token reuse detected! Family revoked:', storedToken.family_id);
@@ -150,7 +150,7 @@ router.post('/refresh', async (req, res) => {
 
     // Revoke old token
     await pool.query(
-      'UPDATE refresh_tokens SET revoked = TRUE WHERE id = $1',
+      'UPDATE refresh_tokens SET revoked = 1 WHERE id = $1',
       [storedToken.id]
     );
 
@@ -181,7 +181,7 @@ router.post('/logout', async (req, res) => {
     const { refreshToken } = req.body;
     if (refreshToken) {
       const hash = hashToken(refreshToken);
-      await pool.query('UPDATE refresh_tokens SET revoked = TRUE WHERE token_hash = $1', [hash]);
+      await pool.query('UPDATE refresh_tokens SET revoked = 1 WHERE token_hash = $1', [hash]);
     }
     res.json({ message: 'Logged out' });
   } catch (err) {

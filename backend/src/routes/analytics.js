@@ -10,25 +10,25 @@ router.get('/overview', authenticate, async (req, res) => {
     const [users, projects, tasks, recentActivity] = await Promise.all([
       pool.query(`SELECT
         COUNT(*) as total,
-        COUNT(*) FILTER (WHERE role = 'admin') as admins,
-        COUNT(*) FILTER (WHERE role = 'pm') as pms,
-        COUNT(*) FILTER (WHERE role = 'developer') as developers,
-        COUNT(*) FILTER (WHERE is_active = true) as active
+        SUM(CASE WHEN role = 'admin' THEN 1 ELSE 0 END) as admins,
+        SUM(CASE WHEN role = 'pm' THEN 1 ELSE 0 END) as pms,
+        SUM(CASE WHEN role = 'developer' THEN 1 ELSE 0 END) as developers,
+        SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) as active
       FROM users`),
-      pool.query(`SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status = 'active') as active FROM projects`),
+      pool.query(`SELECT COUNT(*) as total, SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) as active FROM projects`),
       pool.query(`SELECT
         COUNT(*) as total,
-        COUNT(*) FILTER (WHERE status = 'open') as open,
-        COUNT(*) FILTER (WHERE status = 'in_progress') as in_progress,
-        COUNT(*) FILTER (WHERE status = 'review') as review,
-        COUNT(*) FILTER (WHERE status = 'done') as done,
-        COUNT(*) FILTER (WHERE status = 'blocked') as blocked,
-        COUNT(*) FILTER (WHERE manual_priority = 'critical') as critical,
-        COUNT(*) FILTER (WHERE manual_priority = 'high') as high_priority,
-        COALESCE(AVG(ai_priority_score) FILTER (WHERE ai_priority_score > 0), 0) as avg_ai_score,
-        COUNT(*) FILTER (WHERE due_date < CURRENT_DATE AND status != 'done') as overdue
+        SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) as open,
+        SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress,
+        SUM(CASE WHEN status = 'review' THEN 1 ELSE 0 END) as review,
+        SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) as done,
+        SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END) as blocked,
+        SUM(CASE WHEN manual_priority = 'critical' THEN 1 ELSE 0 END) as critical,
+        SUM(CASE WHEN manual_priority = 'high' THEN 1 ELSE 0 END) as high_priority,
+        COALESCE(AVG(CASE WHEN ai_priority_score > 0 THEN ai_priority_score ELSE NULL END), 0) as avg_ai_score,
+        SUM(CASE WHEN due_date < date('now') AND status != 'done' THEN 1 ELSE 0 END) as overdue
       FROM tasks`),
-      pool.query(`SELECT COUNT(*) as total FROM audit_log WHERE created_at > NOW() - INTERVAL '7 days'`),
+      pool.query(`SELECT COUNT(*) as total FROM audit_log WHERE created_at > datetime('now', '-7 days')`),
     ]);
 
     res.json({
@@ -49,12 +49,12 @@ router.get('/team-workload', authenticate, async (req, res) => {
     const { project_id } = req.query;
     let query = `
       SELECT u.id, u.name, u.role, u.avatar_color,
-        COUNT(t.id) FILTER (WHERE t.status != 'done') as active_tasks,
-        COUNT(t.id) FILTER (WHERE t.status = 'done') as completed_tasks,
+        SUM(CASE WHEN t.id IS NOT NULL AND t.status != 'done' THEN 1 ELSE 0 END) as active_tasks,
+        SUM(CASE WHEN t.id IS NOT NULL AND t.status = 'done' THEN 1 ELSE 0 END) as completed_tasks,
         COUNT(t.id) as total_tasks,
-        COALESCE(SUM(t.story_points) FILTER (WHERE t.status != 'done'), 0) as active_points,
-        COALESCE(SUM(t.story_points) FILTER (WHERE t.status = 'done'), 0) as completed_points,
-        COUNT(t.id) FILTER (WHERE t.due_date < CURRENT_DATE AND t.status != 'done') as overdue_tasks
+        COALESCE(SUM(CASE WHEN t.status != 'done' THEN t.story_points ELSE 0 END), 0) as active_points,
+        COALESCE(SUM(CASE WHEN t.status = 'done' THEN t.story_points ELSE 0 END), 0) as completed_points,
+        SUM(CASE WHEN t.id IS NOT NULL AND t.due_date < date('now') AND t.status != 'done' THEN 1 ELSE 0 END) as overdue_tasks
       FROM users u
       LEFT JOIN tasks t ON t.assignee_id = u.id
     `;
@@ -63,7 +63,7 @@ router.get('/team-workload', authenticate, async (req, res) => {
       params.push(project_id);
       query += ` AND t.project_id = $${params.length}`;
     }
-    query += ` WHERE u.is_active = TRUE GROUP BY u.id, u.name, u.role, u.avatar_color ORDER BY active_tasks DESC`;
+    query += ` WHERE u.is_active = 1 GROUP BY u.id, u.name, u.role, u.avatar_color ORDER BY active_tasks DESC`;
 
     const result = await pool.query(query, params);
     res.json(result.rows);
@@ -88,10 +88,10 @@ router.get('/project/:id', authenticate, async (req, res) => {
         [projectId]
       ),
       pool.query(
-        `SELECT DATE(created_at) as date, COUNT(*) as created,
-                COUNT(*) FILTER (WHERE status = 'done') as completed
+        `SELECT date(created_at) as date, COUNT(*) as created,
+                SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) as completed
          FROM tasks WHERE project_id = $1
-         GROUP BY DATE(created_at) ORDER BY date DESC LIMIT 30`,
+         GROUP BY date(created_at) ORDER BY date DESC LIMIT 30`,
         [projectId]
       ),
       pool.query(
@@ -122,14 +122,14 @@ router.get('/my-stats', authenticate, async (req, res) => {
       pool.query(
         `SELECT
           COUNT(*) as total_assigned,
-          COUNT(*) FILTER (WHERE status = 'open') as open,
-          COUNT(*) FILTER (WHERE status = 'in_progress') as in_progress,
-          COUNT(*) FILTER (WHERE status = 'review') as in_review,
-          COUNT(*) FILTER (WHERE status = 'done') as completed,
-          COUNT(*) FILTER (WHERE status = 'blocked') as blocked,
-          COUNT(*) FILTER (WHERE due_date < CURRENT_DATE AND status != 'done') as overdue,
-          COALESCE(SUM(story_points) FILTER (WHERE status = 'done'), 0) as completed_points,
-          COALESCE(SUM(story_points) FILTER (WHERE status != 'done'), 0) as remaining_points
+          SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) as open,
+          SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress,
+          SUM(CASE WHEN status = 'review' THEN 1 ELSE 0 END) as in_review,
+          SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) as completed,
+          SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END) as blocked,
+          SUM(CASE WHEN due_date < date('now') AND status != 'done' THEN 1 ELSE 0 END) as overdue,
+          COALESCE(SUM(CASE WHEN status = 'done' THEN story_points ELSE 0 END), 0) as completed_points,
+          COALESCE(SUM(CASE WHEN status != 'done' THEN story_points ELSE 0 END), 0) as remaining_points
         FROM tasks WHERE assignee_id = $1`,
         [userId]
       ),
@@ -142,23 +142,23 @@ router.get('/my-stats', authenticate, async (req, res) => {
       pool.query(
         `SELECT id, title, completed_at, project_id, story_points
          FROM tasks WHERE assignee_id = $1 AND status = 'done'
-         ORDER BY completed_at DESC NULLS LAST LIMIT 5`,
+         ORDER BY CASE WHEN completed_at IS NULL THEN 1 ELSE 0 END, completed_at DESC LIMIT 5`,
         [userId]
       ),
       pool.query(
         `SELECT COUNT(*) as count, COALESCE(SUM(story_points), 0) as points
          FROM tasks WHERE assignee_id = $1 AND status = 'done'
-           AND completed_at >= date_trunc('week', CURRENT_DATE)`,
+           AND completed_at >= date('now', 'weekday 0', '-6 days')`,
         [userId]
       ),
       pool.query(
         `SELECT COUNT(*) as count, COALESCE(SUM(story_points), 0) as points
          FROM tasks WHERE assignee_id = $1 AND status = 'done'
-           AND completed_at >= date_trunc('month', CURRENT_DATE)`,
+           AND completed_at >= date('now', 'start of month')`,
         [userId]
       ),
       pool.query(
-        `SELECT DISTINCT DATE(completed_at) as date
+        `SELECT DISTINCT date(completed_at) as date
          FROM tasks WHERE assignee_id = $1 AND status = 'done' AND completed_at IS NOT NULL
          ORDER BY date DESC LIMIT 60`,
         [userId]
@@ -166,13 +166,17 @@ router.get('/my-stats', authenticate, async (req, res) => {
       pool.query(
         `SELECT id, title, ai_priority_score, due_date, manual_priority, project_id, story_points
          FROM tasks WHERE assignee_id = $1 AND status != 'done' AND status != 'blocked'
-         ORDER BY ai_priority_score DESC, due_date ASC NULLS LAST LIMIT 1`,
+         ORDER BY ai_priority_score DESC, CASE WHEN due_date IS NULL THEN 1 ELSE 0 END, due_date ASC LIMIT 1`,
         [userId]
       ),
       pool.query(
-        `SELECT UNNEST(tags) as tag, COUNT(*) as count
-         FROM tasks WHERE assignee_id = $1 AND tags IS NOT NULL AND array_length(tags, 1) > 0
-         GROUP BY tag ORDER BY count DESC LIMIT 20`,
+        `SELECT j.value as tag, COUNT(*) as count
+         FROM tasks, json_each(tasks.tags) j
+         WHERE tasks.assignee_id = $1
+           AND tasks.tags IS NOT NULL
+           AND tasks.tags != '[]'
+         GROUP BY j.value
+         ORDER BY count DESC LIMIT 20`,
         [userId]
       ),
     ]);
@@ -226,13 +230,16 @@ router.get('/my-stats', authenticate, async (req, res) => {
 router.get('/trends', authenticate, async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT d::date as date,
-        COALESCE(COUNT(t.id) FILTER (WHERE t.completed_at::date = d::date), 0) as completed,
-        COALESCE(COUNT(t2.id) FILTER (WHERE t2.created_at::date = d::date), 0) as created
-      FROM generate_series(CURRENT_DATE - 29, CURRENT_DATE, '1 day'::interval) d
-      LEFT JOIN tasks t ON t.completed_at::date = d::date
-      LEFT JOIN tasks t2 ON t2.created_at::date = d::date
-      GROUP BY d::date ORDER BY d::date
+      WITH RECURSIVE dates(d) AS (
+        SELECT date('now', '-29 days')
+        UNION ALL
+        SELECT date(d, '+1 day') FROM dates WHERE d < date('now')
+      )
+      SELECT dates.d as date,
+        (SELECT COUNT(*) FROM tasks WHERE date(completed_at) = dates.d) as completed,
+        (SELECT COUNT(*) FROM tasks WHERE date(created_at) = dates.d) as created
+      FROM dates
+      ORDER BY dates.d
     `);
     res.json({ days: result.rows });
   } catch (err) {
@@ -246,7 +253,7 @@ router.get('/priority-distribution', authenticate, async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT manual_priority, COUNT(*) as count,
-        COUNT(*) FILTER (WHERE status != 'done') as active_count
+        SUM(CASE WHEN status != 'done' THEN 1 ELSE 0 END) as active_count
       FROM tasks GROUP BY manual_priority
     `);
     res.json({ distribution: result.rows });
@@ -317,11 +324,11 @@ router.get('/project-health', authenticate, async (req, res) => {
     const result = await pool.query(`
       SELECT p.id, p.name, p.status,
         COUNT(t.id) as task_count,
-        COUNT(t.id) FILTER (WHERE t.status = 'done') as done_count,
-        COUNT(t.id) FILTER (WHERE t.status != 'done') as active_count,
-        COUNT(t.id) FILTER (WHERE t.due_date < CURRENT_DATE AND t.status != 'done') as overdue_count,
-        COUNT(t.id) FILTER (WHERE t.status = 'blocked') as blocked_count,
-        COALESCE(AVG(t.ai_priority_score) FILTER (WHERE t.ai_priority_score > 0), 0) as avg_score
+        SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END) as done_count,
+        SUM(CASE WHEN t.id IS NOT NULL AND t.status != 'done' THEN 1 ELSE 0 END) as active_count,
+        SUM(CASE WHEN t.id IS NOT NULL AND t.due_date < date('now') AND t.status != 'done' THEN 1 ELSE 0 END) as overdue_count,
+        SUM(CASE WHEN t.id IS NOT NULL AND t.status = 'blocked' THEN 1 ELSE 0 END) as blocked_count,
+        COALESCE(AVG(CASE WHEN t.ai_priority_score > 0 THEN t.ai_priority_score ELSE NULL END), 0) as avg_score
       FROM projects p
       LEFT JOIN tasks t ON t.project_id = p.id
       WHERE p.status = 'active'

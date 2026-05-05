@@ -1,4 +1,5 @@
 const express = require('express');
+const { v4: uuidv4 } = require('uuid');
 const { pool } = require('../config/db');
 const { authenticate } = require('../middleware/auth');
 
@@ -29,29 +30,29 @@ router.post('/:taskId/comments', authenticate, async (req, res) => {
     }
 
     const result = await pool.query(
-      `INSERT INTO task_comments (task_id, user_id, content) VALUES ($1, $2, $3)
+      `INSERT INTO task_comments (id, task_id, user_id, content) VALUES ($1, $2, $3, $4)
        RETURNING *`,
-      [req.params.taskId, req.user.id, content.trim()]
+      [uuidv4(), req.params.taskId, req.user.id, content.trim()]
     );
 
     // Get commenter name for notification
-    const task = await pool.query('SELECT title, assignee_id, created_by FROM tasks WHERE id = $1', [req.params.taskId]);
+    const task = await pool.query('SELECT title, assignee_id, created_by, project_id FROM tasks WHERE id = $1', [req.params.taskId]);
     if (task.rows.length > 0) {
       const t = task.rows[0];
       // Notify assignee and creator (if not the commenter)
       const notifyIds = new Set([t.assignee_id, t.created_by].filter(id => id && id !== req.user.id));
       for (const uid of notifyIds) {
         await pool.query(
-          `INSERT INTO notifications (user_id, type, message, link)
-           VALUES ($1, 'mention', $2, $3)`,
-          [uid, `${req.user.name} commented on "${t.title}"`, `/projects/${task.rows[0].project_id || ''}`]
+          `INSERT INTO notifications (id, user_id, type, message, link)
+           VALUES ($1, $2, 'mention', $3, $4)`,
+          [uuidv4(), uid, `${req.user.name} commented on "${t.title}"`, `/projects/${t.project_id || ''}`]
         );
       }
 
       // Activity log
       await pool.query(
-        `INSERT INTO task_activity (task_id, user_id, action, new_value) VALUES ($1, $2, 'comment', $3)`,
-        [req.params.taskId, req.user.id, content.trim().substring(0, 100)]
+        `INSERT INTO task_activity (id, task_id, user_id, action, new_value) VALUES ($1, $2, $3, 'comment', $4)`,
+        [uuidv4(), req.params.taskId, req.user.id, content.trim().substring(0, 100)]
       );
     }
 

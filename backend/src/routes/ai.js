@@ -1,5 +1,6 @@
 const express = require('express');
 const fetch = require('node-fetch');
+const { v4: uuidv4 } = require('uuid');
 const { pool } = require('../config/db');
 const { authenticate, requireRole } = require('../middleware/auth');
 
@@ -75,7 +76,7 @@ router.post('/prioritize', authenticate, async (req, res) => {
     let updated = 0;
     for (const pred of predictions.results) {
       await pool.query(
-        `UPDATE tasks SET ai_priority_score = $1, ai_explanation = $2, updated_at = NOW()
+        `UPDATE tasks SET ai_priority_score = $1, ai_explanation = $2, updated_at = datetime('now')
          WHERE id = $3`,
         [pred.score, JSON.stringify(pred.explanation), pred.id]
       );
@@ -84,9 +85,9 @@ router.post('/prioritize', authenticate, async (req, res) => {
 
     // Audit log
     await pool.query(
-      `INSERT INTO audit_log (user_id, action, entity_type, entity_id, details)
-       VALUES ($1, 'ai_prioritize', 'project', $2, $3)`,
-      [req.user.id, project_id, JSON.stringify({ tasks_updated: updated })]
+      `INSERT INTO audit_log (id, user_id, action, entity_type, entity_id, details)
+       VALUES ($1, $2, 'ai_prioritize', 'project', $3, $4)`,
+      [uuidv4(), req.user.id, project_id, JSON.stringify({ tasks_updated: updated })]
     );
 
     res.json({ message: `${updated} tasks prioritized`, updated, results: predictions.results });
